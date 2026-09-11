@@ -7,7 +7,7 @@ package singleflight
 import "fmt"
 
 func ExampleGroup() {
-	g := new(Group[string, string])
+	g := new(Group[string])
 
 	block := make(chan struct{})
 	res1c := g.DoChan("key", func() (string, error) {
