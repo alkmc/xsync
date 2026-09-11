@@ -16,6 +16,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -46,14 +47,12 @@ func TestPanicErrorUnwrap(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
-
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
 			var recovered any
 
-			group := &Group{}
+			group := &Group[any]{}
 
 			func() {
 				defer func() {
@@ -83,8 +82,8 @@ func TestPanicErrorUnwrap(t *testing.T) {
 }
 
 func TestDo(t *testing.T) {
-	var g Group
-	v, err, _ := g.Do("key", func() (any, error) {
+	var g Group[string]
+	v, err, _ := g.Do("key", func() (string, error) {
 		return "bar", nil
 	})
 	if got, want := fmt.Sprintf("%v (%T)", v, v), "bar (string)"; got != want {
@@ -96,69 +95,63 @@ func TestDo(t *testing.T) {
 }
 
 func TestDoErr(t *testing.T) {
-	var g Group
+	var g Group[string]
 	someErr := errors.New("Some error")
-	v, err, _ := g.Do("key", func() (any, error) {
-		return nil, someErr
+	v, err, _ := g.Do("key", func() (string, error) {
+		return "", someErr
 	})
-	if err != someErr {
+	if !errors.Is(err, someErr) {
 		t.Errorf("Do error = %v; want someErr %v", err, someErr)
 	}
-	if v != nil {
-		t.Errorf("unexpected non-nil value %#v", v)
+	if v != "" {
+		t.Errorf("unexpected non-zero value %#v", v)
 	}
 }
 
 func TestDoDupSuppress(t *testing.T) {
-	var g Group
-	var wg1, wg2 sync.WaitGroup
-	c := make(chan string, 1)
-	var calls int32
-	fn := func() (any, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
-			// First invocation.
-			wg1.Done()
+	synctest.Test(t, func(t *testing.T) {
+		var g Group[string]
+		var calls atomic.Int32
+		block := make(chan struct{})
+		fn := func() (string, error) {
+			calls.Add(1)
+			<-block
+			return "bar", nil
 		}
-		v := <-c
-		c <- v // pump; make available for any future calls
 
-		time.Sleep(10 * time.Millisecond) // let more goroutines enter Do
+		const n = 10
+		var wg sync.WaitGroup
+		for range n {
+			wg.Go(func() {
+				v, err, shared := g.Do("key", fn)
+				if err != nil {
+					t.Errorf("Do error: %v", err)
+					return
+				}
+				if v != "bar" {
+					t.Errorf("Do = %q; want %q", v, "bar")
+				}
+				if !shared {
+					t.Error("Do shared = false; want true")
+				}
+			})
+		}
 
-		return v, nil
-	}
+		// Returns once every caller is inside Do, one running fn and the rest waiting on it.
+		synctest.Wait()
+		close(block)
+		wg.Wait()
 
-	const n = 10
-	wg1.Add(1)
-	for i := 0; i < n; i++ {
-		wg1.Add(1)
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
-			wg1.Done()
-			v, err, _ := g.Do("key", fn)
-			if err != nil {
-				t.Errorf("Do error: %v", err)
-				return
-			}
-			if s, _ := v.(string); s != "bar" {
-				t.Errorf("Do = %T %v; want %q", v, v, "bar")
-			}
-		}()
-	}
-	wg1.Wait()
-	// At least one goroutine is in fn now and all of them have at
-	// least reached the line before the Do.
-	c <- "bar"
-	wg2.Wait()
-	if got := atomic.LoadInt32(&calls); got <= 0 || got >= n {
-		t.Errorf("number of calls = %d; want over 0 and less than %d", got, n)
-	}
+		if got := calls.Load(); got != 1 {
+			t.Errorf("number of calls = %d; want 1", got)
+		}
+	})
 }
 
 // Test that singleflight behaves correctly after Forget called.
 // See https://github.com/golang/go/issues/31420
 func TestForget(t *testing.T) {
-	var g Group
+	var g Group[int]
 
 	var (
 		firstStarted  = make(chan struct{})
@@ -167,18 +160,18 @@ func TestForget(t *testing.T) {
 	)
 
 	go func() {
-		g.Do("key", func() (i any, e error) {
+		g.Do("key", func() (int, error) {
 			close(firstStarted)
 			<-unblockFirst
 			close(firstFinished)
-			return
+			return 0, nil
 		})
 	}()
 	<-firstStarted
 	g.Forget("key")
 
 	unblockSecond := make(chan struct{})
-	secondResult := g.DoChan("key", func() (i any, e error) {
+	secondResult := g.DoChan("key", func() (int, error) {
 		<-unblockSecond
 		return 2, nil
 	})
@@ -186,7 +179,7 @@ func TestForget(t *testing.T) {
 	close(unblockFirst)
 	<-firstFinished
 
-	thirdResult := g.DoChan("key", func() (i any, e error) {
+	thirdResult := g.DoChan("key", func() (int, error) {
 		return 3, nil
 	})
 
@@ -199,8 +192,8 @@ func TestForget(t *testing.T) {
 }
 
 func TestDoChan(t *testing.T) {
-	var g Group
-	ch := g.DoChan("key", func() (any, error) {
+	var g Group[string]
+	ch := g.DoChan("key", func() (string, error) {
 		return "bar", nil
 	})
 
@@ -218,24 +211,24 @@ func TestDoChan(t *testing.T) {
 // Test singleflight behaves correctly after Do panic.
 // See https://github.com/golang/go/issues/41133
 func TestPanicDo(t *testing.T) {
-	var g Group
-	fn := func() (any, error) {
+	var g Group[string]
+	fn := func() (string, error) {
 		panic("invalid memory address or nil pointer dereference")
 	}
 
 	const n = 5
-	waited := int32(n)
-	panicCount := int32(0)
+	var waited, panicCount atomic.Int32
+	waited.Store(n)
 	done := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer func() {
 				if err := recover(); err != nil {
 					t.Logf("Got panic: %v\n%s", err, debug.Stack())
-					atomic.AddInt32(&panicCount, 1)
+					panicCount.Add(1)
 				}
 
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
@@ -246,8 +239,8 @@ func TestPanicDo(t *testing.T) {
 
 	select {
 	case <-done:
-		if panicCount != n {
-			t.Errorf("Expect %d panic, but got %d", n, panicCount)
+		if got := panicCount.Load(); got != n {
+			t.Errorf("Expect %d panic, but got %d", n, got)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("Do hangs")
@@ -255,23 +248,24 @@ func TestPanicDo(t *testing.T) {
 }
 
 func TestGoexitDo(t *testing.T) {
-	var g Group
-	fn := func() (any, error) {
+	var g Group[string]
+	fn := func() (string, error) {
 		runtime.Goexit()
-		return nil, nil
+		return "", nil
 	}
 
 	const n = 5
-	waited := int32(n)
+	var waited atomic.Int32
+	waited.Store(n)
 	done := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			var err error
 			defer func() {
 				if err != nil {
 					t.Errorf("Error should be nil, but got: %v", err)
 				}
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
@@ -309,8 +303,8 @@ func TestPanicDoChan(t *testing.T) {
 			recover()
 		}()
 
-		g := new(Group)
-		ch := g.DoChan("", func() (any, error) {
+		g := new(Group[string])
+		ch := g.DoChan("", func() (string, error) {
 			panic("Panicking in DoChan")
 		})
 		<-ch
@@ -346,12 +340,12 @@ func TestPanicDoSharedByDoChan(t *testing.T) {
 		blocked := make(chan struct{})
 		unblock := make(chan struct{})
 
-		g := new(Group)
+		g := new(Group[string])
 		go func() {
 			defer func() {
 				recover()
 			}()
-			g.Do("", func() (any, error) {
+			g.Do("", func() (string, error) {
 				close(blocked)
 				<-unblock
 				panic("Panicking in Do")
@@ -359,7 +353,7 @@ func TestPanicDoSharedByDoChan(t *testing.T) {
 		}()
 
 		<-blocked
-		ch := g.DoChan("", func() (any, error) {
+		ch := g.DoChan("", func() (string, error) {
 			panic("DoChan unexpectedly executed callback")
 		})
 		close(unblock)
@@ -389,34 +383,4 @@ func TestPanicDoSharedByDoChan(t *testing.T) {
 	if !bytes.Contains(out.Bytes(), []byte("Panicking in Do")) {
 		t.Errorf("Test subprocess failed, but the crash isn't caused by panicking in Do")
 	}
-}
-
-func ExampleGroup() {
-	g := new(Group)
-
-	block := make(chan struct{})
-	res1c := g.DoChan("key", func() (any, error) {
-		<-block
-		return "func 1", nil
-	})
-	res2c := g.DoChan("key", func() (any, error) {
-		<-block
-		return "func 2", nil
-	})
-	close(block)
-
-	res1 := <-res1c
-	res2 := <-res2c
-
-	// Results are shared by functions executed with duplicate keys.
-	fmt.Println("Shared:", res2.Shared)
-	// Only the first function is executed: it is registered and started with "key",
-	// and doesn't complete before the second function is registered with a duplicate key.
-	fmt.Println("Equal results:", res1.Val.(string) == res2.Val.(string))
-	fmt.Println("Result:", res1.Val)
-
-	// Output:
-	// Shared: true
-	// Equal results: true
-	// Result: func 1
 }
