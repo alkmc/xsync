@@ -46,8 +46,6 @@ func TestPanicErrorUnwrap(t *testing.T) {
 	}
 
 	for _, tc := range testCases {
-		tc := tc
-
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
 
@@ -113,9 +111,9 @@ func TestDoDupSuppress(t *testing.T) {
 	var g Group
 	var wg1, wg2 sync.WaitGroup
 	c := make(chan string, 1)
-	var calls int32
+	var calls atomic.Int32
 	fn := func() (any, error) {
-		if atomic.AddInt32(&calls, 1) == 1 {
+		if calls.Add(1) == 1 {
 			// First invocation.
 			wg1.Done()
 		}
@@ -129,11 +127,9 @@ func TestDoDupSuppress(t *testing.T) {
 
 	const n = 10
 	wg1.Add(1)
-	for i := 0; i < n; i++ {
+	for range n {
 		wg1.Add(1)
-		wg2.Add(1)
-		go func() {
-			defer wg2.Done()
+		wg2.Go(func() {
 			wg1.Done()
 			v, err, _ := g.Do("key", fn)
 			if err != nil {
@@ -143,14 +139,14 @@ func TestDoDupSuppress(t *testing.T) {
 			if s, _ := v.(string); s != "bar" {
 				t.Errorf("Do = %T %v; want %q", v, v, "bar")
 			}
-		}()
+		})
 	}
 	wg1.Wait()
 	// At least one goroutine is in fn now and all of them have at
 	// least reached the line before the Do.
 	c <- "bar"
 	wg2.Wait()
-	if got := atomic.LoadInt32(&calls); got <= 0 || got >= n {
+	if got := calls.Load(); got <= 0 || got >= n {
 		t.Errorf("number of calls = %d; want over 0 and less than %d", got, n)
 	}
 }
@@ -227,7 +223,7 @@ func TestPanicDo(t *testing.T) {
 	waited := int32(n)
 	panicCount := int32(0)
 	done := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			defer func() {
 				if err := recover(); err != nil {
@@ -264,7 +260,7 @@ func TestGoexitDo(t *testing.T) {
 	const n = 5
 	waited := int32(n)
 	done := make(chan struct{})
-	for i := 0; i < n; i++ {
+	for range n {
 		go func() {
 			var err error
 			defer func() {
