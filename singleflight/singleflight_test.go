@@ -220,18 +220,18 @@ func TestPanicDo(t *testing.T) {
 	}
 
 	const n = 5
-	waited := int32(n)
-	panicCount := int32(0)
+	var waited, panicCount atomic.Int32
+	waited.Store(n)
 	done := make(chan struct{})
 	for range n {
 		go func() {
 			defer func() {
 				if err := recover(); err != nil {
 					t.Logf("Got panic: %v\n%s", err, debug.Stack())
-					atomic.AddInt32(&panicCount, 1)
+					panicCount.Add(1)
 				}
 
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
@@ -242,8 +242,8 @@ func TestPanicDo(t *testing.T) {
 
 	select {
 	case <-done:
-		if panicCount != n {
-			t.Errorf("Expect %d panic, but got %d", n, panicCount)
+		if got := panicCount.Load(); got != n {
+			t.Errorf("Expect %d panic, but got %d", n, got)
 		}
 	case <-time.After(time.Second):
 		t.Fatalf("Do hangs")
@@ -258,7 +258,8 @@ func TestGoexitDo(t *testing.T) {
 	}
 
 	const n = 5
-	waited := int32(n)
+	var waited atomic.Int32
+	waited.Store(n)
 	done := make(chan struct{})
 	for range n {
 		go func() {
@@ -267,7 +268,7 @@ func TestGoexitDo(t *testing.T) {
 				if err != nil {
 					t.Errorf("Error should be nil, but got: %v", err)
 				}
-				if atomic.AddInt32(&waited, -1) == 0 {
+				if waited.Add(-1) == 0 {
 					close(done)
 				}
 			}()
