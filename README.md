@@ -30,8 +30,8 @@ user, err, shared := g.Do(userID, func() (*User, error) {
 ## Provenance
 
 The `singleflight` package is derived from
-[golang.org/x/sync/singleflight](https://github.com/golang/sync) v0.24.0,
-revision `36f2d70ecde9857dc4e363242a1369c7645d6770`, released 2026-09-23.
+[golang.org/x/sync/singleflight](https://github.com/golang/sync) v0.25.0,
+revision `1f920df1e8fcf601d1aaf0f2ea500e1d2ccce105`, released 2026-10-15.
 Copyright The Go Authors, licensed under the BSD 3-Clause License. See
 `LICENSE` and `PATENTS`.
 
